@@ -1,662 +1,583 @@
+// ─── src/app/page.tsx (v4 — Elite UI) ────────────────────────────────────────
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useAgentV4 } from '@/hooks/useAgentV4';
+import { DAGGraph } from '@/components/graph/DAGGraph';
+import { ConfidenceGauge } from '@/components/ConfidenceGauge';
+import { EvaluationPanel } from '@/components/EvaluationPanel';
+import { DOMAIN_CONFIGS, type DomainMode } from '@/lib/agent/types-v4';
 
-// ── Types ──
-interface ResearchResult {
-  id: string;
-  query: string;
-  answer: string;
-  confidence: number;
-  provider: string;
-  model: string;
-  depth: string;
-  timestamp: number;
-}
+const DEPTH_OPTIONS = [
+  { value: 'quick',      label: 'Quick',      desc: '~30s',  steps: '2-3' },
+  { value: 'standard',   label: 'Standard',   desc: '~90s',  steps: '4-5' },
+  { value: 'deep',       label: 'Deep',       desc: '~3min', steps: '5-6' },
+  { value: 'exhaustive', label: 'Exhaustive', desc: '~6min', steps: '6-7' },
+] as const;
 
-interface MemoryContext {
-  id: string;
-  query: string;
-  answer: string;
-  provider: string;
-  model: string;
-  created_at?: string;
-  timestamp?: number;
-}
+const PROVIDER_OPTIONS = [
+  { value: 'anthropic', label: 'Anthropic', model: 'claude-sonnet-4-5', badge: 'Recommended' },
+  { value: 'openai',    label: 'OpenAI',    model: 'gpt-4o',            badge: null },
+  { value: 'gemini',    label: 'Gemini',    model: 'gemini-1.5-pro',    badge: 'Fast' },
+  { value: 'nvidia',    label: 'NVIDIA',    model: 'meta/llama-3.1-70b-instruct', badge: 'Open' },
+] as const;
 
-// ── Helpers ──
-async function callResearchAPI(
-  provider: string,
-  model: string,
-  systemPrompt: string,
-  userPrompt: string,
-  maxTokens: number,
-  temperature: number,
-  signal: AbortSignal
-): Promise<string> {
-  const r = await fetch('/api/research', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, model, systemPrompt, userPrompt, maxTokens, temperature }),
-    signal,
-  });
-  if (!r.ok) {
-    const e = await r.json();
-    throw new Error(e.error || `API error ${r.status}`);
-  }
-  const d = await r.json();
-  return d.result;
-}
-
-async function apiSaveHistory(item: Omit<ResearchResult, 'id'>) {
-  await fetch('/api/history', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...item, user_id: 'anonymous' }),
-  });
-}
-
-async function apiLoadHistory(): Promise<ResearchResult[]> {
-  const r = await fetch('/api/history?user_id=anonymous');
-  const { data } = await r.json();
-  return data || [];
-}
-
-async function apiSaveMemory(ctx: Omit<MemoryContext, 'id'>) {
-  await fetch('/api/memory', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...ctx, user_id: 'anonymous' }),
-  });
-}
-
-async function apiLoadMemory(): Promise<MemoryContext[]> {
-  const r = await fetch('/api/memory?user_id=anonymous');
-  const { data } = await r.json();
-  return data || [];
-}
-
-async function apiClearMemory() {
-  await fetch('/api/memory?user_id=anonymous', { method: 'DELETE' });
-}
-
-// ── Constants ──
-const PROVIDERS: Record<string, { name: string; color: string; models: { value: string; label: string }[] }> = {
-  anthropic: {
-    name: 'Anthropic',
-    color: '#e07b39',
-    models: [
-      { value: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
-      { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
-      { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
-    ],
-  },
-  openai: {
-    name: 'OpenAI',
-    color: '#74aa9c',
-    models: [
-      { value: 'gpt-4o', label: 'GPT-4o' },
-      { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-      { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
-      { value: 'o1-preview', label: 'o1 Preview' },
-    ],
-  },
-  gemini: {
-    name: 'Google Gemini',
-    color: '#4285f4',
-    models: [
-      { value: 'gemini-2.0-flash-exp', label: 'Gemini 2.0 Flash' },
-      { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
-      { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
-    ],
-  },
-  nvidia: {
-    name: 'NVIDIA NIM',
-    color: '#76b900',
-    models: [
-      { value: 'meta/llama-3.1-405b-instruct', label: 'Llama 3.1 405B' },
-      { value: 'meta/llama-3.1-70b-instruct', label: 'Llama 3.1 70B' },
-      { value: 'mistralai/mixtral-8x22b-instruct-v0.1', label: 'Mixtral 8x22B' },
-    ],
-  },
+const EXAMPLE_QUERIES: Record<DomainMode, string[]> = {
+  general:    ['How does transformer attention scale with sequence length?', 'What caused the 2008 financial crisis?'],
+  finance:    ['Explain VaR and CVaR for portfolio risk management', 'Compare Black-Scholes vs Monte Carlo for options pricing'],
+  technical:  ['Compare Raft vs Paxos consensus algorithms', 'Design a rate limiter for a distributed API gateway'],
+  medical:    ['Explain the mechanism of GLP-1 agonists for diabetes', 'What are the long-term effects of sleep deprivation?'],
+  legal:      ["What constitutes fair use under US copyright law?", "Explain GDPR right to erasure requirements"],
+  scientific: ['What is quantum entanglement and how is it measured?', 'Explain CRISPR-Cas9 off-target effects'],
 };
 
-const PASS_LABELS = [
-  'INITIAL ANALYSIS',
-  'DEEP INVESTIGATION',
-  'CRITICAL EVALUATION',
-  'CROSS-VALIDATION',
-  'EXPERT SYNTHESIS',
-  'ADVERSARIAL REVIEW',
-  'DOMAIN EXPANSION',
-  'FINAL REFINEMENT',
-];
+function AuroraBackground() {
+  return (
+    <div className="aurora-container" aria-hidden>
+      <div className="aurora aurora-1" />
+      <div className="aurora aurora-2" />
+      <div className="aurora aurora-3" />
+      <div className="aurora-grid" />
+    </div>
+  );
+}
 
-function computeConfidence(answer: string, numPasses: number, docChunks: number, hasMem: boolean): number {
-  let s = 45;
-  s += Math.min(15, answer.split(' ').length / 120);
-  s += Math.min(18, numPasses * 3.5);
-  s += Math.min(12, docChunks * 2);
-  if (hasMem) s += 5;
-  const ev = (answer.match(/according to|research shows|evidence suggests|data shows/gi) || []).length;
-  s += Math.min(10, ev * 1.5);
-  if (answer.includes('##') || answer.includes('|')) s += 4;
-  return Math.min(97, Math.max(22, Math.round(s)));
+function AgentMessageFeed({ messages }: { messages: Array<{ fromRole: string; toRole: string; content: string; messageType: string; timestamp: number }> }) {
+  if (messages.length === 0) return null;
+  const TYPE_COLORS: Record<string, string> = {
+    challenge: '#f59e0b', verification: '#10b981', correction: '#ef4444', output: '#6366f1',
+  };
+  return (
+    <div className="message-feed">
+      <div className="feed-header">
+        <span className="feed-title">Agent Dialogue</span>
+        <span className="feed-count">{messages.length} exchanges</span>
+      </div>
+      {messages.map((msg, i) => (
+        <motion.div key={i} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
+          transition={{ delay: i * 0.1 }} className="msg-item"
+          style={{ borderLeftColor: TYPE_COLORS[msg.messageType] ?? '#27272a' }}>
+          <div className="msg-header">
+            <span className="msg-from" style={{ color: TYPE_COLORS[msg.messageType] ?? '#6366f1' }}>{msg.fromRole.toUpperCase()}</span>
+            <span className="msg-arrow">→</span>
+            <span className="msg-to">{msg.toRole.toUpperCase()}</span>
+            <span className="msg-type">[{msg.messageType}]</span>
+          </div>
+          <div className="msg-preview">{msg.content.substring(0, 200)}{msg.content.length > 200 ? '…' : ''}</div>
+        </motion.div>
+      ))}
+    </div>
+  );
+}
+
+function ElapsedTimer({ ms, active }: { ms: number; active: boolean }) {
+  if (!active && ms === 0) return null;
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const display = m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+  return (
+    <motion.span className="elapsed"
+      animate={active ? { opacity: [1, 0.5, 1] } : { opacity: 1 }}
+      transition={{ duration: 1.5, repeat: active ? Infinity : 0 }}>
+      {display}
+    </motion.span>
+  );
 }
 
 function mdToHtml(md: string): string {
-  if (!md) return '';
-  let h = md
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/^### (.*?)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.*?)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.*?)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>')
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+  return md
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[VERIFIED\]/g, '<span class="tag-verified">[VERIFIED]</span>')
+    .replace(/\[DISPUTED\]/g, '<span class="tag-disputed">[DISPUTED]</span>')
+    .replace(/\[UNVERIFIED\]/g, '<span class="tag-unverified">[UNVERIFIED]</span>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/^&gt; (.*?)$/gm, '<blockquote>$1</blockquote>')
-    .replace(/^---$/gm, '<hr />')
-    .replace(/^[\-\*] (.*?)$/gm, '<li>$1</li>')
-    .replace(/^\d+\. (.*?)$/gm, '<li>$1</li>');
-  h = h.replace(/(<li>[\s\S]*?<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`);
-  const parts = h.split(/\n\n+/);
-  return parts.map(p => {
-    if (/^<(h[1-3]|ul|blockquote|hr)/.test(p.trim())) return p;
-    if (p.trim()) return `<p>${p.replace(/\n/g, '<br />')}</p>`;
-    return '';
-  }).join('\n');
+    .replace(/^[-*] (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`)
+    .replace(/^---$/gm, '<hr>')
+    .replace(/\n\n/g, '</p><p>');
 }
 
-function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-// ════════════════════════════════════════════════════════
-// MAIN COMPONENT
-// ════════════════════════════════════════════════════════
-export default function Home() {
-  const [query, setQuery] = useState('');
-  const [provider, setProvider] = useState('anthropic');
-  const [model, setModel] = useState('claude-sonnet-4-5');
-  const [depth, setDepth] = useState('standard');
-  const [maxTokens, setMaxTokens] = useState(4096);
-  const [temperature, setTemperature] = useState(0.3);
-
-  const [isResearching, setIsResearching] = useState(false);
-  const [currentPhase, setCurrentPhase] = useState('');
-  const [progress, setProgress] = useState(0);
-
-  const [results, setResults] = useState<ResearchResult[]>([]);
-  const [history, setHistory] = useState<ResearchResult[]>([]);
-  const [memoryContexts, setMemoryContexts] = useState<MemoryContext[]>([]);
-  const [memoryEnabled, setMemoryEnabled] = useState(false);
-  const [activeContextIds, setActiveContextIds] = useState<Set<string>>(new Set());
-  const [thoughts, setThoughts] = useState<{ type: string; detail: string; time: string }[]>([]);
-  const [activeResultTab, setActiveResultTab] = useState<Record<string, string>>({});
-
-  const abortRef = useRef<AbortController | null>(null);
-  const queryRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    apiLoadHistory().then(setHistory).catch(console.error);
-    apiLoadMemory().then(setMemoryContexts).catch(console.error);
-  }, []);
-
-  // Update model when provider changes
-  useEffect(() => {
-    const firstModel = PROVIDERS[provider]?.models[0]?.value || '';
-    setModel(firstModel);
-  }, [provider]);
-
-  function addThought(type: string, detail: string, t0: number) {
-    const time = `+${((Date.now() - t0) / 1000).toFixed(2)}s`;
-    setThoughts(prev => [...prev, { type, detail, time }]);
-  }
-
-  function buildMemorySection(): string {
-    if (!activeContextIds.size) return '';
-    const sel = memoryContexts.filter(c => activeContextIds.has(c.id));
-    if (!sel.length) return '';
-    return '\n\n━━━ PRIOR RESEARCH CONTEXTS ━━━\n' +
-      sel.map((c, i) => `[Context ${i + 1}]\nPrevious Query: ${c.query}\nPrevious Answer: ${c.answer.substring(0, 600)}...`).join('\n\n') +
-      '\n━━━ END CONTEXTS ━━━\n\nUse the above prior research to inform your current analysis.';
-  }
-
-  async function startResearch() {
-    if (!query.trim() || isResearching) return;
-
-    setIsResearching(true);
-    setThoughts([]);
-    setProgress(0);
-    abortRef.current = new AbortController();
-
-    const numPasses = { quick: 1, standard: 3, deep: 5, exhaustive: 8 }[depth] || 3;
-    const memSection = buildMemorySection();
-    const hasMem = activeContextIds.size > 0;
-    const passResults: string[] = [];
-    const t0 = Date.now();
-    let finalAnswer = '';
-
-    try {
-      addThought('INITIALIZE', `Provider: ${PROVIDERS[provider].name} · Model: ${model} · Passes: ${numPasses}`, t0);
-      setProgress(8);
-
-      if (hasMem) {
-        addThought('MEMORY RETRIEVAL', `Injecting ${activeContextIds.size} prior context(s) for cross-session continuity`, t0);
-      }
-
-      for (let i = 0; i < numPasses; i++) {
-        if (abortRef.current.signal.aborted) break;
-
-        const passLabel = PASS_LABELS[Math.min(i, PASS_LABELS.length - 1)];
-        setCurrentPhase(`Pass ${i + 1}/${numPasses}: ${passLabel}`);
-        addThought(passLabel, `Executing research pass ${i + 1} of ${numPasses}...`, t0);
-        setProgress(16 + (i / numPasses) * 60);
-
-        const sys = `You are NEXUS, a world-class deep research AI. Pass ${i + 1}/${numPasses} — ${passLabel}. Produce rigorous, structured analysis using markdown. Use headers, tables, and code blocks where appropriate.`;
-        const prevCtx = passResults.length
-          ? `\n\nPREVIOUS PASSES:\n${passResults.map((r, j) => `[Pass ${j + 1}]: ${r.substring(0, 500)}...`).join('\n\n')}`
-          : '';
-        const usr = `RESEARCH QUERY: ${query}${memSection}${prevCtx}\n\nExecute ${passLabel}. Be thorough and precise.`;
-
-        const response = await callResearchAPI(
-          provider, model, sys, usr, maxTokens, temperature, abortRef.current.signal
-        );
-        passResults.push(response);
-        addThought(`PASS ${i + 1} COMPLETE`, `${response.split(' ').length.toLocaleString()} words generated`, t0);
-      }
-
-      if (!abortRef.current.signal.aborted && numPasses > 1 && passResults.length > 1) {
-        setCurrentPhase('Synthesizing...');
-        setProgress(85);
-        addThought('SYNTHESIS', `Synthesizing ${passResults.length} passes into final response...`, t0);
-
-        const sys = `You are NEXUS SYNTHESIS ENGINE. Produce a definitive research report from ${passResults.length} analysis passes. Structure: Executive Summary → Detailed Analysis → Key Findings → Limitations → Conclusions. Use rich markdown.`;
-        const usr = `QUERY: ${query}${memSection}\n\n${passResults.map((r, i) => `━━ PASS ${i + 1} ━━\n${r}`).join('\n\n')}\n\nSynthesize into the definitive final answer.`;
-
-        finalAnswer = await callResearchAPI(
-          provider, model, sys, usr, maxTokens, temperature, abortRef.current.signal
-        );
-      } else {
-        finalAnswer = passResults[passResults.length - 1] || '';
-      }
-
-      if (!abortRef.current.signal.aborted && finalAnswer) {
-        setProgress(95);
-        const confidence = computeConfidence(finalAnswer, passResults.length, 0, hasMem);
-        const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-        addThought('COMPLETE', `Done in ${elapsed}s · Confidence: ${confidence}%`, t0);
-
-        const resultItem: ResearchResult = {
-          id: Date.now().toString(),
-          query,
-          answer: finalAnswer,
-          confidence,
-          provider,
-          model,
-          depth,
-          timestamp: Date.now(),
-        };
-
-        setResults(prev => [resultItem, ...prev]);
-        setActiveResultTab(prev => ({ ...prev, [resultItem.id]: 'answer' }));
-
-        // Persist to Supabase
-        await apiSaveHistory(resultItem).catch(console.error);
-        if (memoryEnabled) {
-          await apiSaveMemory({ query, answer: finalAnswer, provider, model }).catch(console.error);
-          const newMem = await apiLoadMemory().catch(() => []);
-          setMemoryContexts(newMem);
-        }
-        const newHist = await apiLoadHistory().catch(() => []);
-        setHistory(newHist);
-
-        setProgress(100);
-        setCurrentPhase('');
-        setQuery('');
-        if (queryRef.current) queryRef.current.style.height = 'auto';
-      }
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        addThought('ERROR', err.message, t0);
-        console.error('Research error:', err);
-      }
-    } finally {
-      setIsResearching(false);
-      setCurrentPhase('');
-    }
-  }
-
-  function stopResearch() {
-    abortRef.current?.abort();
-    setIsResearching(false);
-    setCurrentPhase('');
-    setProgress(0);
-  }
-
-  function toggleContext(id: string) {
-    setActiveContextIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else if (next.size < 5) next.add(id);
-      return next;
-    });
-  }
-
-  function getTabForResult(id: string) {
-    return activeResultTab[id] || 'answer';
-  }
-
-  function setTabForResult(id: string, tab: string) {
-    setActiveResultTab(prev => ({ ...prev, [id]: tab }));
-  }
-
-  const confColor = (c: number) => c >= 80 ? '#34d399' : c >= 60 ? '#fbbf24' : '#f87171';
-
-  // ── RENDER ──
+function ResultView({ result }: { result: NonNullable<ReturnType<typeof useAgentV4>['state']['result']> }) {
+  const [tab, setTab] = useState<'answer' | 'trace' | 'messages'>('answer');
+  const [copied, setCopied] = useState(false);
+  function copy() { navigator.clipboard.writeText(result.answer); setCopied(true); setTimeout(() => setCopied(false), 2000); }
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#060710', color: '#eaecf8', fontFamily: "'DM Sans', sans-serif", overflow: 'hidden' }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: rgba(99,120,255,0.2); border-radius: 2px; }
-        textarea { font-family: inherit; }
-        select { font-family: 'DM Mono', monospace; }
-        .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 14px; cursor: pointer; font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #4e5470; transition: all 0.2s; white-space: nowrap; }
-        .tab-btn:hover { color: #9ca3c8; }
-        .tab-btn.active { color: #6378ff; border-bottom-color: #6378ff; }
-        .answer-body h1, .answer-body h2, .answer-body h3 { font-family: 'Syne', sans-serif; font-weight: 700; margin: 20px 0 10px; padding-bottom: 6px; border-bottom: 1px solid rgba(99,120,255,0.1); }
-        .answer-body h1 { font-size: 18px; } .answer-body h2 { font-size: 16px; } .answer-body h3 { font-size: 14px; }
-        .answer-body p { margin-bottom: 14px; }
-        .answer-body strong { color: #a78bfa; font-weight: 500; }
-        .answer-body em { color: #9ca3c8; font-style: italic; }
-        .answer-body code { font-family: 'DM Mono', monospace; font-size: 12px; background: #101325; border: 1px solid rgba(99,120,255,0.15); padding: 2px 6px; border-radius: 4px; color: #38bdf8; }
-        .answer-body pre { background: #101325; border: 1px solid rgba(99,120,255,0.15); border-radius: 10px; padding: 16px; margin: 14px 0; overflow-x: auto; }
-        .answer-body pre code { background: none; border: none; padding: 0; }
-        .answer-body ul { margin: 8px 0 14px 22px; }
-        .answer-body li { margin-bottom: 6px; line-height: 1.75; }
-        .answer-body blockquote { border-left: 3px solid #6378ff; padding: 8px 16px; margin: 14px 0; color: #9ca3c8; font-style: italic; background: rgba(99,120,255,0.04); border-radius: 0 8px 8px 0; }
-        .answer-body hr { border: none; border-top: 1px solid rgba(99,120,255,0.1); margin: 20px 0; }
-        .answer-body table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
-        .answer-body th { background: rgba(99,120,255,0.1); padding: 8px 12px; border: 1px solid rgba(99,120,255,0.15); font-weight: 600; text-align: left; }
-        .answer-body td { padding: 7px 12px; border: 1px solid rgba(99,120,255,0.08); color: #9ca3c8; }
-        .hint-chip:hover { border-color: #6378ff !important; color: #9ca3c8 !important; background: rgba(99,120,255,0.05) !important; }
-        .mem-item:hover { background: #161930 !important; }
-        .hist-item:hover { background: #101325 !important; }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-        @keyframes spin { to{transform:rotate(360deg)} }
-        @keyframes cardIn { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
-        @keyframes stepIn { from{opacity:0;transform:translateX(-6px)} to{opacity:1;transform:translateX(0)} }
-      `}</style>
+    <div className="result-view">
+      <div className="result-tabs-bar">
+        {(['answer', 'trace', 'messages'] as const).map((t) => (
+          <button key={t} className={`rtab ${tab === t ? 'rtab-active' : ''}`} onClick={() => setTab(t)}>
+            {t === 'answer' ? '📄 Answer' : t === 'trace' ? `🔍 Trace (${result.dag.nodes.length})` : `💬 Dialogue (${result.agentMessages.length})`}
+          </button>
+        ))}
+        <div style={{ flex: 1 }} />
+        <button className="copy-btn" onClick={copy}>{copied ? '✓ Copied' : '⎘ Copy'}</button>
+      </div>
+      <AnimatePresence mode="wait">
+        {tab === 'answer' && (
+          <motion.div key="ans" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="answer-content">
+            <div className="answer-meta">
+              <span className="meta-pill" style={{ background: '#6366f120', color: '#818cf8' }}>{result.domain}</span>
+              <span className="meta-pill" style={{ background: '#06b6d420', color: '#22d3ee' }}>{result.depth}</span>
+              <span className="meta-pill" style={{ background: '#10b98120', color: '#34d399' }}>{result.confidence}% confidence</span>
+            </div>
+            <div className="md-body" dangerouslySetInnerHTML={{ __html: mdToHtml(result.answer) }} />
+            {result.keyFindings.length > 0 && (
+              <div className="key-findings">
+                <div className="kf-title">Key Findings</div>
+                {result.keyFindings.map((f, i) => (
+                  <div key={i} className="kf-item"><span className="kf-dot" />{f}</div>
+                ))}
+              </div>
+            )}
+          </motion.div>
+        )}
+        {tab === 'trace' && (
+          <motion.div key="trace" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="trace-view">
+            {result.dag.nodes.map((node, i) => (
+              <div key={node.id} className={`trace-node trace-${node.status}`}>
+                <div className="tn-index">{i + 1}</div>
+                <div className="tn-body">
+                  <div className="tn-role">{node.role.toUpperCase()}</div>
+                  <div className="tn-label">{node.label}</div>
+                  {node.endTime && node.startTime && <div className="tn-time">{node.endTime - node.startTime}ms</div>}
+                  {node.confidence != null && <div className="tn-conf">{Math.round(node.confidence * 100)}%</div>}
+                </div>
+                <div className="tn-status">{node.status === 'done' ? '✓' : node.status === 'error' ? '✗' : '…'}</div>
+              </div>
+            ))}
+            <div className="trace-summary">
+              Total: {result.totalLatencyMs < 1000 ? `${result.totalLatencyMs}ms` : `${(result.totalLatencyMs / 1000).toFixed(1)}s`}
+              {' · '}Circuit breaks: {result.circuitBreaks}
+            </div>
+          </motion.div>
+        )}
+        {tab === 'messages' && (
+          <motion.div key="msgs" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <AgentMessageFeed messages={result.agentMessages} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
 
-      {/* HEADER */}
-      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 22px', height: 56, background: 'rgba(6,7,16,0.9)', borderBottom: '1px solid rgba(99,120,255,0.08)', backdropFilter: 'blur(20px)', flexShrink: 0, zIndex: 100 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 17, letterSpacing: 3 }}>
-          <div style={{ width: 30, height: 30, background: 'linear-gradient(135deg,#6378ff,#38bdf8)', borderRadius: 8, display: 'grid', placeItems: 'center', fontSize: 15 }}>⬡</div>
-          NEXUS
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 2, padding: '2px 6px', border: '1px solid rgba(99,120,255,0.15)', borderRadius: 3 }}>v2.0</span>
+export default function Home() {
+  const { state, run, abort, reset } = useAgentV4();
+  const [query, setQuery] = useState('');
+  const [depth, setDepth] = useState<'quick' | 'standard' | 'deep' | 'exhaustive'>('standard');
+  const [domain, setDomain] = useState<DomainMode>('general');
+  const [provider, setProvider] = useState<'anthropic' | 'openai' | 'gemini' | 'nvidia'>('anthropic');
+  const [showSettings, setShowSettings] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isActive = ['planning', 'running', 'evaluating'].includes(state.status);
+  const domainCfg = DOMAIN_CONFIGS[domain];
+  const selectedProvider = PROVIDER_OPTIONS.find((p) => p.value === provider)!;
+  const confidenceFromEval = state.evaluation ? Math.round(state.evaluation.overallScore * 100) : 0;
+  const evalHistory = state.evaluation ? [Math.round(state.evaluation.overallScore * 100)] : [];
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [query]);
+
+  function handleSubmit() {
+    if (!query.trim() || isActive) return;
+    run({ query: query.trim(), depth, domain, provider, model: selectedProvider.model, userId: 'anonymous' });
+  }
+
+  function handleKey(e: React.KeyboardEvent) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSubmit();
+  }
+
+  return (
+    <div className="page">
+      <AuroraBackground />
+
+      <header className="hdr">
+        <div className="hdr-left">
+          <div className="logo-wrap">
+            <div className="logo-hex">
+              <svg viewBox="0 0 40 46" fill="none" width="22" height="26">
+                <path d="M20 1L39 12V34L20 45L1 34V12L20 1Z" stroke="url(#lg)" strokeWidth="1.5" fill="url(#lgf)" />
+                <defs>
+                  <linearGradient id="lg" x1="0" y1="0" x2="40" y2="46" gradientUnits="userSpaceOnUse">
+                    <stop stopColor="#6366f1" /><stop offset="1" stopColor="#06b6d4" />
+                  </linearGradient>
+                  <linearGradient id="lgf" x1="0" y1="0" x2="40" y2="46" gradientUnits="userSpaceOnUse">
+                    <stop stopColor="#6366f110" /><stop offset="1" stopColor="#06b6d410" />
+                  </linearGradient>
+                </defs>
+                <text x="20" y="29" textAnchor="middle" fill="url(#lg)" fontSize="14" fontWeight="700" fontFamily="monospace">N</text>
+              </svg>
+            </div>
+            <div>
+              <div className="logo-name">NexusAI</div>
+              <div className="logo-tag">Quant-Grade Research Agent</div>
+            </div>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#34d399', animation: 'pulse 2s infinite' }} />
-            <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#34d399', letterSpacing: 1 }}>
-              {isResearching ? 'RESEARCHING...' : 'OPERATIONAL'}
-            </span>
+
+        <div className="hdr-center">
+          <div className="domain-pills">
+            {(Object.keys(DOMAIN_CONFIGS) as DomainMode[]).map((d) => (
+              <button key={d}
+                className={`domain-pill ${domain === d ? 'domain-pill-active' : ''}`}
+                style={domain === d ? { '--pill-color': DOMAIN_CONFIGS[d].color } as React.CSSProperties : {}}
+                onClick={() => setDomain(d)} disabled={isActive}>
+                <span>{DOMAIN_CONFIGS[d].icon}</span>
+                {DOMAIN_CONFIGS[d].label}
+              </button>
+            ))}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px', border: '1px solid rgba(99,120,255,0.15)', borderRadius: 20, fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#9ca3c8' }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: PROVIDERS[provider]?.color || '#6378ff' }} />
-            {PROVIDERS[provider]?.name} · {model.split('/').pop()?.split('-').slice(0, 3).join('-')}
-          </div>
+        </div>
+
+        <div className="hdr-right">
+          {isActive && (
+            <motion.div className="live-badge" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <motion.div className="live-dot" animate={{ scale: [1, 1.6, 1] }} transition={{ duration: 1.2, repeat: Infinity }} />
+              LIVE
+            </motion.div>
+          )}
+          <button className="icon-btn" onClick={() => setShowSettings((s) => !s)} title="Settings">⚙</button>
         </div>
       </header>
 
-      {/* BODY */}
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <AnimatePresence>
+        {state.status === 'idle' && (
+          <motion.section className="hero" initial={{ opacity: 1 }} exit={{ opacity: 0, y: -20 }} transition={{ duration: 0.4 }}>
+            <motion.div className="hero-badge" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
+              <span className="hero-badge-dot" />
+              Multi-agent · Adversarial critique · Self-improving
+            </motion.div>
+            <motion.h1 className="hero-title" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, type: 'spring', stiffness: 200 }}>
+              Research that<span className="hero-gradient"> challenges itself</span>
+            </motion.h1>
+            <motion.p className="hero-sub" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
+              A Planner → Researcher → Critic → Verifier → Synthesizer system.
+              Agents challenge each other. Circuit breakers handle failures.
+              The system learns from every poor result.
+            </motion.p>
+            <motion.div className="feature-pills" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
+              {[
+                { icon: '⬡', text: 'DAG Execution',     color: '#6366f1' },
+                { icon: '⊘', text: 'Adversarial Critic', color: '#f59e0b' },
+                { icon: '✓', text: 'Fact Verification',  color: '#10b981' },
+                { icon: '⚡', text: 'Circuit Breakers',   color: '#06b6d4' },
+                { icon: '◎', text: 'Self-Improving',     color: '#ec4899' },
+              ].map(({ icon, text, color }) => (
+                <div key={text} className="feature-pill" style={{ '--fp-color': color } as React.CSSProperties}>
+                  <span style={{ color }}>{icon}</span>{text}
+                </div>
+              ))}
+            </motion.div>
+          </motion.section>
+        )}
+      </AnimatePresence>
 
-        {/* SIDEBAR */}
-        <aside style={{ width: 300, background: '#0b0d1c', borderRight: '1px solid rgba(99,120,255,0.08)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div style={{ flex: 1, overflowY: 'auto' }}>
-
-            {/* Provider */}
-            <div style={{ padding: '14px 16px', borderBottom: '1px solid rgba(99,120,255,0.06)' }}>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 2.5, textTransform: 'uppercase', marginBottom: 10 }}>Provider</div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 4, marginBottom: 10 }}>
-                {Object.entries(PROVIDERS).map(([key, p]) => (
-                  <button key={key} onClick={() => setProvider(key)} style={{ padding: '7px 3px', borderRadius: 6, border: `1px solid ${provider === key ? '#6378ff' : 'rgba(99,120,255,0.1)'}`, background: provider === key ? 'rgba(99,120,255,0.1)' : 'none', cursor: 'pointer', fontFamily: "'DM Mono',monospace", fontSize: 8, color: provider === key ? '#eaecf8' : '#4e5470', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, transition: 'all 0.2s' }}>
-                    <span style={{ fontSize: 13 }}>{key === 'anthropic' ? '🟠' : key === 'openai' ? '🟢' : key === 'gemini' ? '🔵' : '🟩'}</span>
-                    {p.name.split(' ')[0]}
+      <div className="layout">
+        <AnimatePresence>
+          {showSettings && (
+            <motion.aside className="sidebar"
+              initial={{ opacity: 0, x: -20, width: 0 }}
+              animate={{ opacity: 1, x: 0, width: 220 }}
+              exit={{ opacity: 0, x: -20, width: 0 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 28 }}>
+              <div className="sb-section">
+                <div className="sb-label">Research Depth</div>
+                {DEPTH_OPTIONS.map((opt) => (
+                  <button key={opt.value} className={`sb-btn ${depth === opt.value ? 'sb-btn-active' : ''}`}
+                    onClick={() => setDepth(opt.value)} disabled={isActive}>
+                    <div className="sb-btn-main">{opt.label}</div>
+                    <div className="sb-btn-sub">{opt.desc} · {opt.steps} steps</div>
                   </button>
                 ))}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                <label style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 1 }}>MODEL</label>
-                <select value={model} onChange={e => setModel(e.target.value)} style={{ width: '100%', background: '#101325', border: '1px solid rgba(99,120,255,0.15)', borderRadius: 7, padding: '7px 10px', fontSize: 11, color: '#eaecf8', outline: 'none' }}>
-                  {PROVIDERS[provider]?.models.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-                </select>
-              </div>
-            </div>
-
-            {/* Config */}
-            <div style={{ padding: '14px 16px', borderBottom: '1px solid rgba(99,120,255,0.06)' }}>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 2.5, textTransform: 'uppercase', marginBottom: 10 }}>Research Config</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                {[
-                  { label: 'DEPTH', node: <select value={depth} onChange={e => setDepth(e.target.value)} style={{ width: '100%', background: '#101325', border: '1px solid rgba(99,120,255,0.15)', borderRadius: 7, padding: '7px 10px', fontSize: 11, color: '#eaecf8', outline: 'none' }}><option value="quick">Quick (1x)</option><option value="standard">Standard (3x)</option><option value="deep">Deep (5x)</option><option value="exhaustive">Full (8x)</option></select> },
-                  { label: 'MAX TOKENS', node: <input type="number" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} min={512} max={16384} step={512} style={{ width: '100%', background: '#101325', border: '1px solid rgba(99,120,255,0.15)', borderRadius: 7, padding: '7px 10px', fontSize: 11, color: '#eaecf8', outline: 'none' }} /> },
-                  { label: 'TEMPERATURE', node: <input type="number" value={temperature} onChange={e => setTemperature(Number(e.target.value))} min={0} max={2} step={0.05} style={{ width: '100%', background: '#101325', border: '1px solid rgba(99,120,255,0.15)', borderRadius: 7, padding: '7px 10px', fontSize: 11, color: '#eaecf8', outline: 'none' }} /> },
-                ].map(({ label, node }) => (
-                  <div key={label} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                    <label style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 1 }}>{label}</label>
-                    {node}
-                  </div>
+              <div className="sb-section">
+                <div className="sb-label">Provider</div>
+                {PROVIDER_OPTIONS.map((opt) => (
+                  <button key={opt.value} className={`sb-btn ${provider === opt.value ? 'sb-btn-active' : ''}`}
+                    onClick={() => setProvider(opt.value)} disabled={isActive}>
+                    <div className="sb-btn-main">
+                      {opt.label}
+                      {opt.badge && <span className="sb-badge">{opt.badge}</span>}
+                    </div>
+                    <div className="sb-btn-sub" style={{ fontSize: 9 }}>{opt.model}</div>
+                  </button>
                 ))}
               </div>
-            </div>
-
-            {/* Memory */}
-            <div style={{ padding: '14px 16px', borderBottom: '1px solid rgba(99,120,255,0.06)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 2.5, textTransform: 'uppercase' }}>Memory</div>
-                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <button onClick={() => { apiClearMemory(); setMemoryContexts([]); setActiveContextIds(new Set()); }} style={{ background: 'none', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 4, color: '#f87171', fontFamily: "'DM Mono',monospace", fontSize: 9, padding: '2px 7px', cursor: 'pointer', opacity: 0.7 }}>Clear</button>
-                  <div onClick={() => setMemoryEnabled(m => !m)} style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
-                    <div style={{ width: 32, height: 18, background: memoryEnabled ? 'rgba(99,120,255,0.3)' : '#161930', border: `1px solid ${memoryEnabled ? '#6378ff' : 'rgba(99,120,255,0.15)'}`, borderRadius: 10, position: 'relative', transition: 'all 0.2s' }}>
-                      <div style={{ width: 12, height: 12, borderRadius: '50%', background: memoryEnabled ? '#6378ff' : '#4e5470', position: 'absolute', top: 2, left: memoryEnabled ? 16 : 2, transition: 'all 0.2s' }} />
+              <AnimatePresence>
+                {(isActive || state.status === 'done') && confidenceFromEval > 0 && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="sb-section">
+                    <div className="sb-label">Confidence</div>
+                    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>
+                      <ConfidenceGauge value={confidenceFromEval} history={evalHistory} size="sm" />
                     </div>
-                    <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#9ca3c8' }}>{memoryEnabled ? 'ON' : 'OFF'}</span>
-                  </div>
-                </div>
-              </div>
-              <div style={{ maxHeight: 140, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {memoryContexts.length === 0
-                  ? <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#4e5470', textAlign: 'center', padding: 12 }}>{memoryEnabled ? 'No contexts yet' : 'Enable memory above'}</div>
-                  : memoryContexts.slice(0, 10).map(c => {
-                    const sel = activeContextIds.has(c.id);
-                    return <div key={c.id} className="mem-item" onClick={() => toggleContext(c.id)} style={{ padding: '6px 8px', background: sel ? 'rgba(52,211,153,0.05)' : '#101325', borderRadius: 6, borderLeft: `2px solid ${sel ? '#34d399' : '#6378ff'}`, cursor: 'pointer', transition: 'all 0.2s' }}>
-                      <div style={{ fontSize: 10, color: '#9ca3c8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sel ? '✓ ' : ''}{c.query.substring(0, 50)}{c.query.length > 50 ? '…' : ''}</div>
-                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: '#4e5470', marginTop: 2 }}>{c.provider} · {c.model.split('/').pop()}</div>
-                    </div>;
-                  })}
-              </div>
-              {activeContextIds.size > 0 && (
-                <div style={{ marginTop: 6, padding: '4px 8px', background: 'rgba(99,120,255,0.08)', border: '1px solid rgba(99,120,255,0.15)', borderRadius: 6, fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#a78bfa' }}>
-                  🧠 {activeContextIds.size} context(s) active — will be injected into next query
-                </div>
-              )}
-            </div>
-
-            {/* History */}
-            <div style={{ padding: '14px 16px' }}>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 2.5, textTransform: 'uppercase', marginBottom: 8 }}>History</div>
-              {history.length === 0
-                ? <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#4e5470', textAlign: 'center', padding: 12 }}>No history yet</div>
-                : history.slice(0, 20).map(h => {
-                  const cc = h.confidence >= 80 ? '#34d399' : h.confidence >= 60 ? '#fbbf24' : '#f87171';
-                  return <div key={h.id} className="hist-item" style={{ padding: '7px 10px', borderRadius: 8, cursor: 'pointer', marginBottom: 3, transition: 'all 0.2s' }}>
-                    <div style={{ fontSize: 11, color: '#9ca3c8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>{h.query}</div>
-                    <div style={{ display: 'flex', gap: 6, fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470' }}>
-                      <span style={{ padding: '1px 5px', borderRadius: 3, background: `${cc}20`, color: cc }}>{h.confidence}%</span>
-                      <span style={{ padding: '1px 5px', borderRadius: 3, background: 'rgba(99,120,255,0.1)', color: '#a78bfa' }}>{h.provider}</span>
-                    </div>
-                  </div>;
-                })}
-            </div>
-
-          </div>
-        </aside>
-
-        {/* MAIN */}
-        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-          {/* Active context banner */}
-          {activeContextIds.size > 0 && (
-            <div style={{ padding: '7px 22px', background: 'rgba(11,13,28,0.7)', borderBottom: '1px solid rgba(99,120,255,0.08)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flexShrink: 0 }}>
-              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 1.5, textTransform: 'uppercase' }}>Active Contexts:</span>
-              {Array.from(activeContextIds).map(id => {
-                const c = memoryContexts.find(x => x.id === id);
-                return c ? <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 20, background: 'rgba(99,120,255,0.1)', border: '1px solid rgba(99,120,255,0.2)', fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#a78bfa' }}>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }}>{c.query.substring(0, 35)}…</span>
-                  <span onClick={() => toggleContext(id)} style={{ cursor: 'pointer', color: '#4e5470', marginLeft: 2 }}>✕</span>
-                </div> : null;
-              })}
-              <span onClick={() => { setActiveContextIds(new Set()); }} style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', cursor: 'pointer' }}>clear all</span>
-            </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.aside>
           )}
+        </AnimatePresence>
 
-          {/* Query Input */}
-          <div style={{ padding: '18px 22px 12px', borderBottom: '1px solid rgba(99,120,255,0.08)', background: 'rgba(11,13,28,0.4)', backdropFilter: 'blur(10px)', flexShrink: 0 }}>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', background: '#0b0d1c', border: `1.5px solid ${isResearching ? '#6378ff' : 'rgba(99,120,255,0.18)'}`, borderRadius: 14, padding: '14px 16px', transition: 'all 0.2s', boxShadow: isResearching ? '0 0 0 3px rgba(99,120,255,0.08)' : 'none' }}>
-              <textarea ref={queryRef} value={query} onChange={e => { setQuery(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 280) + 'px'; }} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) startResearch(); }} placeholder="Enter a deep research question… (Ctrl+Enter to submit)" rows={2} style={{ flex: 1, background: 'none', border: 'none', outline: 'none', fontSize: 15, color: '#eaecf8', resize: 'none', lineHeight: 1.7, minHeight: 64, maxHeight: 280 }} />
-              <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexShrink: 0 }}>
-                {isResearching && <button onClick={stopResearch} style={{ padding: '11px 16px', background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.25)', borderRadius: 10, color: '#f87171', fontFamily: "'DM Mono',monospace", fontSize: 11, cursor: 'pointer' }}>⏹ Stop</button>}
-                <button onClick={startResearch} disabled={isResearching || !query.trim()} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '11px 22px', background: 'linear-gradient(135deg,#6378ff,#4a60ff)', border: 'none', borderRadius: 10, color: 'white', fontFamily: "'Syne',sans-serif", fontWeight: 700, fontSize: 13, cursor: 'pointer', opacity: isResearching || !query.trim() ? 0.45 : 1, transition: 'all 0.2s' }}>⚡ Research</button>
+        <main className="main-col">
+          <motion.div className="input-card" layout
+            style={{ '--domain-color': domainCfg.color } as React.CSSProperties}>
+            <div className="input-domain-strip"
+              style={{ background: `linear-gradient(90deg, ${domainCfg.color}22, transparent)` }}>
+              <span style={{ color: domainCfg.color }}>{domainCfg.icon}</span>
+              <span className="input-domain-label">{domainCfg.label} Research</span>
+              <span className="input-model-label">{selectedProvider.label} · {selectedProvider.model}</span>
+              <button className="settings-toggle" onClick={() => setShowSettings((s) => !s)}>
+                {showSettings ? '← Hide' : '⚙ Settings'}
+              </button>
+            </div>
+            <textarea ref={textareaRef} className="query-ta"
+              placeholder={`Ask a ${domainCfg.label.toLowerCase()} research question…`}
+              value={query} onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleKey} disabled={isActive} rows={3} />
+            <div className="input-footer">
+              <div className="footer-left">
+                <span className="char-count">{query.length}/2000</span>
+                <span className="kb-hint">⌘↵ to run</span>
+                <ElapsedTimer ms={state.elapsedMs} active={isActive} />
+              </div>
+              <div className="footer-actions">
+                {(isActive || state.status !== 'idle') && (
+                  <button className="btn-ghost" onClick={() => { abort(); reset(); setQuery(''); }}>
+                    {isActive ? '■ Stop' : '↺ Reset'}
+                  </button>
+                )}
+                <motion.button className="btn-run"
+                  style={{ '--rc': domainCfg.color } as React.CSSProperties}
+                  onClick={handleSubmit} disabled={!query.trim() || isActive}
+                  whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+                  {isActive ? (
+                    <motion.span animate={{ opacity: [1, 0.5, 1] }} transition={{ duration: 1, repeat: Infinity }}>
+                      {state.status === 'planning' ? '◈ Planning…' : state.status === 'evaluating' ? '◎ Evaluating…' : '⬡ Researching…'}
+                    </motion.span>
+                  ) : `→ Run ${domainCfg.label} Research`}
+                </motion.button>
               </div>
             </div>
+          </motion.div>
 
-            {/* Progress */}
-            {isResearching && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ height: 2, background: 'rgba(99,120,255,0.1)', borderRadius: 1, overflow: 'hidden', marginBottom: 6 }}>
-                  <div style={{ height: '100%', background: 'linear-gradient(90deg,#6378ff,#38bdf8)', borderRadius: 1, width: `${progress}%`, transition: 'width 0.6s ease' }} />
-                </div>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#6378ff', letterSpacing: 1 }}>{currentPhase}</div>
-              </div>
+          <AnimatePresence>
+            {state.status === 'idle' && EXAMPLE_QUERIES[domain] && (
+              <motion.div className="examples-row" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+                <span className="examples-label">Try:</span>
+                {EXAMPLE_QUERIES[domain].map((ex) => (
+                  <button key={ex} className="example-chip" onClick={() => setQuery(ex)}>
+                    {ex.substring(0, 60)}{ex.length > 60 ? '…' : ''}
+                  </button>
+                ))}
+              </motion.div>
             )}
+          </AnimatePresence>
 
-            {/* Hint chips */}
-            <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-              {[
-                ['🔬 Transformers', 'Analyze the evolution of transformer architectures from BERT to modern LLMs'],
-                ['📚 RAG Systems', 'What are the key limitations of RAG systems and how can they be mitigated?'],
-                ['🖼️ Diffusion vs GAN', 'Compare diffusion models vs GANs — architecture, quality, and speed tradeoffs'],
-                ['💼 AI Economics', 'Analyze economic implications of AI on software engineering roles'],
-              ].map(([label, q]) => (
-                <div key={label} className="hint-chip" onClick={() => { setQuery(q); if (queryRef.current) { queryRef.current.style.height = 'auto'; queryRef.current.style.height = Math.min(queryRef.current.scrollHeight, 280) + 'px'; } }} style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, padding: '4px 10px', border: '1px solid rgba(99,120,255,0.1)', borderRadius: 20, color: '#4e5470', cursor: 'pointer', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>{label}</div>
-              ))}
-            </div>
-          </div>
-
-          {/* Results */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: 22, display: 'flex', flexDirection: 'column', gap: 20 }}>
-
-            {/* Live thought process while researching */}
-            {isResearching && thoughts.length > 0 && (
-              <div style={{ background: '#0b0d1c', border: '1px solid rgba(99,120,255,0.12)', borderRadius: 16, overflow: 'hidden', animation: 'cardIn 0.35s ease' }}>
-                <div style={{ padding: '12px 18px', borderBottom: '1px solid rgba(99,120,255,0.08)', fontFamily: "'Syne',sans-serif", fontWeight: 600, fontSize: 13 }}>🧠 Live Thought Process</div>
-                <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 0 }}>
-                  {thoughts.map((t, i) => (
-                    <div key={i} style={{ display: 'flex', gap: 10, paddingBottom: i < thoughts.length - 1 ? 12 : 0, position: 'relative', animation: 'stepIn 0.25s ease' }}>
-                      {i < thoughts.length - 1 && <div style={{ position: 'absolute', left: 13, top: 28, bottom: 0, width: 1, background: 'rgba(99,120,255,0.1)' }} />}
-                      <div style={{ width: 26, height: 26, borderRadius: '50%', background: 'rgba(99,120,255,0.1)', border: '1.5px solid rgba(99,120,255,0.3)', display: 'grid', placeItems: 'center', fontSize: 10, flexShrink: 0, color: '#6378ff' }}>◎</div>
-                      <div>
-                        <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#6378ff', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 2 }}>{t.type}</div>
-                        <div style={{ fontSize: 13, color: '#9ca3c8', lineHeight: 1.6 }}>{t.detail}</div>
-                        <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: '#4e5470', marginTop: 2 }}>{t.time}</div>
-                      </div>
-                    </div>
-                  ))}
-                  <div style={{ display: 'flex', gap: 4, padding: '10px 0 0 36px' }}>
-                    {[0, 1, 2].map(i => <div key={i} style={{ width: 6, height: 6, borderRadius: '50%', background: '#6378ff', animation: `pulse 1.2s ${i * 0.2}s infinite` }} />)}
-                  </div>
-                </div>
-              </div>
+          <AnimatePresence>
+            {state.dag && (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 28 }}>
+                <DAGGraph dag={state.dag} activeNodeId={state.activeNodeId} />
+              </motion.div>
             )}
+          </AnimatePresence>
 
-            {/* Result Cards */}
-            {results.map(r => {
-              const tab = getTabForResult(r.id);
-              const cc = confColor(r.confidence);
-              return (
-                <div key={r.id} style={{ background: '#0b0d1c', border: '1px solid rgba(99,120,255,0.1)', borderRadius: 18, overflow: 'hidden', animation: 'cardIn 0.35s ease' }}>
-                  {/* Card Header */}
-                  <div style={{ padding: '14px 20px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, borderBottom: '1px solid rgba(99,120,255,0.06)', background: 'rgba(99,120,255,0.02)' }}>
-                    <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 14, fontWeight: 600, flex: 1, lineHeight: 1.5 }}>{r.query}</div>
-                    <div style={{ display: 'flex', gap: 5, flexShrink: 0, flexWrap: 'wrap', alignItems: 'center' }}>
-                      {[PROVIDERS[r.provider]?.name || r.provider, r.model.split('/').pop()?.split('-').slice(0,3).join('-') || '', r.depth.toUpperCase(), new Date(r.timestamp).toLocaleTimeString()].map((b, i) => (
-                        <span key={i} style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, padding: '3px 8px', borderRadius: 4, border: '1px solid rgba(99,120,255,0.15)', color: i === 0 ? PROVIDERS[r.provider]?.color : '#4e5470', background: i === 0 ? `${PROVIDERS[r.provider]?.color}11` : 'none' }}>{b}</span>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Confidence */}
-                  <div style={{ padding: '12px 20px', borderBottom: '1px solid rgba(99,120,255,0.06)', display: 'flex', alignItems: 'center', gap: 16 }}>
-                    <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 38, fontWeight: 800, color: cc, lineHeight: 1 }}>{r.confidence}%</div>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#4e5470', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 6 }}>CONFIDENCE SCORE</div>
-                      <div style={{ height: 4, background: 'rgba(99,120,255,0.1)', borderRadius: 2, overflow: 'hidden' }}>
-                        <div style={{ height: '100%', width: `${r.confidence}%`, background: `linear-gradient(90deg,${cc},${cc}88)`, borderRadius: 2, transition: 'width 1.2s ease' }} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Tabs */}
-                  <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid rgba(99,120,255,0.06)', overflowX: 'auto' }}>
-                    {[['answer', '📝 Answer'], ['thoughts', '🧠 Thought Process']].map(([t, label]) => (
-                      <button key={t} className={`tab-btn ${tab === t ? 'active' : ''}`} onClick={() => setTabForResult(r.id, t)}>{label}</button>
-                    ))}
-                  </div>
-
-                  {/* Tab Content */}
-                  {tab === 'answer' && (
-                    <div style={{ padding: '24px 26px' }}>
-                      <div className="answer-body" style={{ fontSize: 15, lineHeight: 1.9, color: '#eaecf8' }} dangerouslySetInnerHTML={{ __html: mdToHtml(r.answer) }} />
-                    </div>
-                  )}
-                  {tab === 'thoughts' && (
-                    <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 0 }}>
-                      {thoughts.map((t, i) => (
-                        <div key={i} style={{ display: 'flex', gap: 10, paddingBottom: i < thoughts.length - 1 ? 12 : 0, position: 'relative' }}>
-                          {i < thoughts.length - 1 && <div style={{ position: 'absolute', left: 13, top: 28, bottom: 0, width: 1, background: 'rgba(99,120,255,0.08)' }} />}
-                          <div style={{ width: 26, height: 26, borderRadius: '50%', background: 'rgba(99,120,255,0.1)', border: '1.5px solid rgba(99,120,255,0.25)', display: 'grid', placeItems: 'center', fontSize: 10, flexShrink: 0, color: '#6378ff' }}>◎</div>
-                          <div>
-                            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#6378ff', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 2 }}>{t.type}</div>
-                            <div style={{ fontSize: 13, color: '#9ca3c8', lineHeight: 1.6 }}>{t.detail}</div>
-                            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: '#4e5470', marginTop: 2 }}>{t.time}</div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Empty state */}
-            {results.length === 0 && !isResearching && (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, opacity: 0.5, padding: 40, textAlign: 'center' }}>
-                <div style={{ fontSize: 56 }}>🔭</div>
-                <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 22, fontWeight: 700, color: '#9ca3c8' }}>NEXUS Deep Research v2</div>
-                <div style={{ fontSize: 13, color: '#4e5470', maxWidth: 440, lineHeight: 1.7 }}>Multi-provider AI research with contextual memory, multi-pass analysis, and confidence scoring. Select your provider and enter a question to begin.</div>
-              </div>
+          <AnimatePresence>
+            {state.agentMessages.length > 0 && state.status !== 'done' && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                <AgentMessageFeed messages={state.agentMessages} />
+              </motion.div>
             )}
-          </div>
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {state.result && (
+              <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 250, damping: 26 }}>
+                <ResultView result={state.result} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {state.evaluation && (
+              <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+                <EvaluationPanel evaluation={state.evaluation} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {state.improvements.length > 0 && (
+              <motion.div className="improvement-notice" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}>
+                <span className="imp-icon">◎</span>
+                <div>
+                  <div className="imp-title">System Learned</div>
+                  <div className="imp-desc">{state.improvements[0].pattern} — {state.improvements[0].correction.substring(0, 120)}</div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {state.status === 'error' && state.error && (
+              <motion.div className="error-card" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                <div className="err-title">Agent Error</div>
+                <div className="err-msg">{state.error}</div>
+                <button className="btn-ghost" onClick={reset}>Try Again</button>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </main>
       </div>
+
+      <style jsx global>{`
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        html{color-scheme:dark;scroll-behavior:smooth}
+        body{background:#060608;color:#f0f0f2;font-family:var(--font-inter,'Inter',system-ui,-apple-system,sans-serif);-webkit-font-smoothing:antialiased;min-height:100vh;overflow-x:hidden}
+        ::-webkit-scrollbar{width:4px;height:4px}
+        ::-webkit-scrollbar-track{background:transparent}
+        ::-webkit-scrollbar-thumb{background:#27272a;border-radius:2px}
+        ::selection{background:#312e81;color:#c7d2fe}
+        .md-body h1{font-size:17px;font-weight:600;color:#f4f4f5;margin:18px 0 8px;border-bottom:0.5px solid #1e1e24;padding-bottom:8px}
+        .md-body h2{font-size:14px;font-weight:500;color:#e4e4e7;margin:14px 0 6px}
+        .md-body h3{font-size:13px;font-weight:500;color:#d4d4d8;margin:10px 0 4px}
+        .md-body p{margin:8px 0;color:#a1a1aa;line-height:1.8;font-size:13.5px}
+        .md-body ul{padding-left:16px;margin:8px 0}
+        .md-body li{margin:4px 0;color:#a1a1aa;font-size:13px;line-height:1.7}
+        .md-body strong{color:#f4f4f5;font-weight:500}
+        .md-body code{font-family:'JetBrains Mono',monospace;font-size:12px;background:#1a1a2e;padding:1px 6px;border-radius:4px;color:#818cf8;border:0.5px solid #312e81}
+        .md-body hr{border:none;border-top:0.5px solid #1e1e24;margin:16px 0}
+        .tag-verified{color:#10b981;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace}
+        .tag-disputed{color:#f59e0b;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace}
+        .tag-unverified{color:#52525b;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace}
+      `}</style>
+
+      <style jsx>{`
+        .aurora-container{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
+        .aurora{position:absolute;border-radius:50%;filter:blur(80px);opacity:0.12;animation:afloat 20s ease-in-out infinite}
+        .aurora-1{width:700px;height:500px;top:-100px;left:-100px;background:radial-gradient(circle,#6366f1,#312e81,transparent);animation-delay:0s}
+        .aurora-2{width:600px;height:400px;top:20%;right:-150px;background:radial-gradient(circle,#06b6d4,#0e7490,transparent);animation-delay:-7s}
+        .aurora-3{width:500px;height:600px;bottom:-100px;left:30%;background:radial-gradient(circle,#ec4899,#831843,transparent);animation-delay:-14s}
+        .aurora-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,0.015) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.015) 1px,transparent 1px);background-size:40px 40px}
+        @keyframes afloat{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(40px,-30px) scale(1.1)}66%{transform:translate(-20px,20px) scale(0.95)}}
+        .page{position:relative;z-index:1;min-height:100vh;display:flex;flex-direction:column}
+        .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:0.5px solid #1e1e24;background:rgba(6,6,8,0.85);backdrop-filter:blur(16px);position:sticky;top:0;z-index:50;gap:16px}
+        .hdr-left,.hdr-right{flex-shrink:0}
+        .hdr-center{flex:1;display:flex;justify-content:center}
+        .logo-wrap{display:flex;align-items:center;gap:10px}
+        .logo-name{font-size:14px;font-weight:600;letter-spacing:-0.03em;color:#f4f4f5}
+        .logo-tag{font-size:9px;color:#52525b;letter-spacing:0.06em;font-family:'JetBrains Mono',monospace;text-transform:uppercase}
+        .hdr-right{display:flex;align-items:center;gap:10px}
+        .live-badge{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:600;color:#10b981;font-family:'JetBrains Mono',monospace;letter-spacing:0.08em}
+        .live-dot{width:6px;height:6px;border-radius:50%;background:#10b981}
+        .icon-btn{background:transparent;border:0.5px solid #27272a;color:#52525b;width:30px;height:30px;border-radius:7px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.15s}
+        .icon-btn:hover{background:#1a1a1f;color:#a1a1aa}
+        .domain-pills{display:flex;gap:4px;flex-wrap:wrap;justify-content:center}
+        .domain-pill{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:9999px;border:0.5px solid #27272a;background:transparent;color:#71717a;font-size:11px;font-weight:500;cursor:pointer;font-family:inherit;transition:all 0.2s;white-space:nowrap}
+        .domain-pill:hover:not(:disabled){border-color:#3f3f46;color:#a1a1aa}
+        .domain-pill-active{background:color-mix(in srgb,var(--pill-color) 15%,transparent);border-color:color-mix(in srgb,var(--pill-color) 50%,transparent);color:var(--pill-color)}
+        .domain-pill:disabled{opacity:0.5;cursor:not-allowed}
+        .hero{padding:56px 24px 32px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:16px;max-width:740px;margin:0 auto;width:100%}
+        .hero-badge{display:flex;align-items:center;gap:7px;font-size:11px;color:#71717a;letter-spacing:0.05em;border:0.5px solid #27272a;padding:5px 14px;border-radius:9999px;background:rgba(255,255,255,0.02)}
+        .hero-badge-dot{width:5px;height:5px;border-radius:50%;background:#6366f1;box-shadow:0 0 6px #6366f1}
+        .hero-title{font-size:clamp(32px,5vw,52px);font-weight:700;line-height:1.1;letter-spacing:-0.04em;color:#f4f4f5}
+        .hero-gradient{background:linear-gradient(135deg,#6366f1,#06b6d4,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+        .hero-sub{font-size:15px;color:#71717a;line-height:1.7;max-width:520px}
+        .feature-pills{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:4px}
+        .feature-pill{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:7px;font-size:11px;font-weight:500;color:#71717a;border:0.5px solid #1e1e24;background:rgba(255,255,255,0.02);transition:all 0.2s}
+        .feature-pill:hover{border-color:color-mix(in srgb,var(--fp-color) 40%,transparent);color:var(--fp-color)}
+        .layout{display:flex;flex:1;gap:0}
+        .sidebar{flex-shrink:0;overflow:hidden;border-right:0.5px solid #1e1e24;background:rgba(6,6,8,0.7);backdrop-filter:blur(12px);padding:16px 12px;display:flex;flex-direction:column;gap:16px}
+        .sb-section{display:flex;flex-direction:column;gap:4px}
+        .sb-label{font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:0.1em;color:#3f3f46;margin-bottom:4px;padding-left:4px;font-family:'JetBrains Mono',monospace}
+        .sb-btn{width:100%;padding:8px 10px;border-radius:8px;border:0.5px solid transparent;background:transparent;text-align:left;cursor:pointer;font-family:inherit;transition:all 0.15s}
+        .sb-btn:hover:not(:disabled){background:#111116}
+        .sb-btn-active{background:#111116;border-color:#27272a}
+        .sb-btn:disabled{opacity:0.5;cursor:not-allowed}
+        .sb-btn-main{font-size:12px;font-weight:500;color:#d4d4d8;display:flex;align-items:center;gap:6px}
+        .sb-btn-sub{font-size:10px;color:#52525b;margin-top:2px;font-family:'JetBrains Mono',monospace}
+        .sb-badge{font-size:9px;padding:1px 6px;background:#312e81;color:#a5b4fc;border-radius:4px}
+        .main-col{flex:1;min-width:0;padding:20px 24px;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+        .input-card{background:rgba(13,13,16,0.92);border:0.5px solid #1e1e24;border-top:1.5px solid var(--domain-color,#6366f1);border-radius:14px;overflow:hidden;backdrop-filter:blur(8px);box-shadow:0 0 40px color-mix(in srgb,var(--domain-color,#6366f1) 8%,transparent)}
+        .input-domain-strip{display:flex;align-items:center;gap:8px;padding:8px 14px;font-size:11px;border-bottom:0.5px solid #1a1a1f}
+        .input-domain-label{font-weight:500;color:#71717a}
+        .input-model-label{color:#3f3f46;font-family:'JetBrains Mono',monospace;font-size:10px}
+        .settings-toggle{margin-left:auto;font-size:11px;color:#52525b;background:transparent;border:0.5px solid #27272a;padding:2px 8px;border-radius:5px;cursor:pointer;font-family:inherit;transition:all 0.15s}
+        .settings-toggle:hover{color:#a1a1aa}
+        .query-ta{width:100%;padding:14px 16px;background:transparent;border:none;outline:none;color:#f0f0f2;font-family:inherit;font-size:14.5px;line-height:1.8;resize:none;caret-color:var(--domain-color,#6366f1)}
+        .query-ta::placeholder{color:#3f3f46}
+        .query-ta:disabled{opacity:0.6}
+        .input-footer{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-top:0.5px solid #111116}
+        .footer-left{display:flex;align-items:center;gap:12px}
+        .footer-actions{display:flex;gap:6px}
+        .char-count{font-size:11px;color:#3f3f46;font-family:'JetBrains Mono',monospace}
+        .kb-hint{font-size:10px;color:#27272a}
+        .elapsed{font-size:11px;color:#52525b;font-family:'JetBrains Mono',monospace}
+        .btn-ghost{padding:6px 12px;border-radius:7px;background:transparent;color:#71717a;border:0.5px solid #27272a;font-size:12px;cursor:pointer;font-family:inherit;transition:all 0.15s}
+        .btn-ghost:hover{background:#111116;color:#a1a1aa}
+        .btn-run{padding:8px 18px;border-radius:8px;background:linear-gradient(135deg,var(--rc,#6366f1),color-mix(in srgb,var(--rc,#6366f1) 70%,#06b6d4));color:white;border:none;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;letter-spacing:-0.01em;box-shadow:0 4px 20px color-mix(in srgb,var(--rc,#6366f1) 30%,transparent);transition:box-shadow 0.2s,opacity 0.2s}
+        .btn-run:disabled{opacity:0.5;cursor:not-allowed;box-shadow:none}
+        .examples-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+        .examples-label{font-size:11px;color:#3f3f46;flex-shrink:0}
+        .example-chip{padding:5px 12px;border-radius:7px;background:#111116;border:0.5px solid #1e1e24;color:#71717a;font-size:11px;cursor:pointer;font-family:inherit;text-align:left;transition:all 0.15s;line-height:1.4}
+        .example-chip:hover{background:#1a1a1f;color:#a1a1aa;border-color:#27272a}
+        .message-feed{background:#0a0a0d;border:0.5px solid #1e1e24;border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+        .feed-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+        .feed-title{font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:#3f3f46;font-family:'JetBrains Mono',monospace}
+        .feed-count{font-size:10px;color:#3f3f46}
+        .msg-item{border-left:2px solid #27272a;padding:6px 10px;display:flex;flex-direction:column;gap:3px}
+        .msg-header{display:flex;align-items:center;gap:6px}
+        .msg-from{font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace}
+        .msg-arrow{font-size:10px;color:#27272a}
+        .msg-to{font-size:10px;color:#52525b;font-family:'JetBrains Mono',monospace}
+        .msg-type{font-size:9px;color:#3f3f46}
+        .msg-preview{font-size:11px;color:#71717a;line-height:1.6}
+        .result-view{background:#0a0a0d;border:0.5px solid #1e1e24;border-radius:14px;overflow:hidden}
+        .result-tabs-bar{display:flex;align-items:center;gap:2px;padding:8px 12px;border-bottom:0.5px solid #111116;background:#0d0d10}
+        .rtab{padding:4px 12px;border-radius:6px;font-size:12px;border:none;background:transparent;color:#52525b;cursor:pointer;transition:all 0.15s;font-family:inherit}
+        .rtab:hover{color:#a1a1aa;background:#111116}
+        .rtab-active{color:#e4e4e7;background:#1a1a2e}
+        .copy-btn{padding:4px 10px;border-radius:6px;font-size:11px;border:0.5px solid #27272a;background:transparent;color:#71717a;cursor:pointer;font-family:inherit;transition:all 0.15s}
+        .copy-btn:hover{color:#a1a1aa}
+        .answer-content{padding:20px 22px}
+        .answer-meta{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+        .meta-pill{font-size:10px;font-weight:500;padding:3px 9px;border-radius:5px;font-family:'JetBrains Mono',monospace}
+        .key-findings{margin-top:20px;padding-top:16px;border-top:0.5px solid #1e1e24}
+        .kf-title{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#3f3f46;margin-bottom:8px;font-family:'JetBrains Mono',monospace}
+        .kf-item{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:#a1a1aa;line-height:1.7;padding:3px 0}
+        .kf-dot{width:4px;height:4px;border-radius:50%;background:#6366f1;flex-shrink:0;margin-top:7px}
+        .trace-view{padding:12px;display:flex;flex-direction:column;gap:6px;max-height:400px;overflow-y:auto}
+        .trace-node{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;border:0.5px solid #1e1e24;background:#0f0f12}
+        .trace-node.trace-done{border-color:#1a2a1a}
+        .trace-node.trace-error{border-color:#2a1a1a}
+        .trace-node.trace-running{border-color:#1a1a2e}
+        .tn-index{font-size:11px;color:#3f3f46;font-family:'JetBrains Mono',monospace;min-width:16px}
+        .tn-body{flex:1;display:flex;align-items:center;gap:10px}
+        .tn-role{font-size:10px;font-weight:600;color:#818cf8;font-family:'JetBrains Mono',monospace;min-width:70px}
+        .tn-label{font-size:11px;color:#71717a}
+        .tn-time{font-size:10px;color:#06b6d4;font-family:'JetBrains Mono',monospace;margin-left:auto}
+        .tn-conf{font-size:10px;color:#10b981;font-family:'JetBrains Mono',monospace}
+        .tn-status{font-size:12px}
+        .trace-done .tn-status{color:#10b981}
+        .trace-error .tn-status{color:#ef4444}
+        .trace-running .tn-status{color:#6366f1}
+        .trace-summary{font-size:11px;color:#3f3f46;font-family:'JetBrains Mono',monospace;text-align:center;padding:8px 0 4px}
+        .improvement-notice{display:flex;align-items:flex-start;gap:12px;padding:12px 14px;background:#0a0a14;border:0.5px solid #1e1e3a;border-radius:10px}
+        .imp-icon{font-size:16px;color:#6366f1;flex-shrink:0;padding-top:2px}
+        .imp-title{font-size:12px;font-weight:500;color:#818cf8;margin-bottom:4px}
+        .imp-desc{font-size:11px;color:#52525b;line-height:1.6}
+        .error-card{background:#0f0505;border:0.5px solid #450a0a;border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+        .err-title{font-size:13px;font-weight:500;color:#ef4444}
+        .err-msg{font-size:11px;color:#fca5a5;font-family:'JetBrains Mono',monospace}
+      `}</style>
     </div>
   );
 }
