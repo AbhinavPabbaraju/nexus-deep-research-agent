@@ -1,4 +1,4 @@
-# NexusAI — Deep Research Agent v3
+# NexusAI — Deep Research Agent
 
 A production-grade, truly agentic research system built on a **Planner → Executor → Evaluator → Loop** architecture. Multi-provider (Anthropic, OpenAI, Gemini, NVIDIA NIM), streaming SSE, pgvector RAG, and an elite UI.
 
@@ -6,7 +6,7 @@ A production-grade, truly agentic research system built on a **Planner → Execu
 
 ## What Makes This a True Agent
 
-Unlike a staged pipeline that runs N fixed passes, NexusAI v3 has genuine decision logic:
+Unlike a staged pipeline that runs N fixed passes, NexusAI  has genuine decision logic:
 
 ```
 User Query
