@@ -1,0 +1,24 @@
+/* ─── src/app/globals.css ─────────────────────────────────────────────────── */
+@import "tailwindcss";
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: #09090b;
+  color: #f4f4f5;
+  font-family: var(--font-inter, system-ui, -apple-system, sans-serif);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root {
+  --font-sans: var(--font-inter, system-ui);
+  --font-mono: var(--font-mono, 'JetBrains Mono', monospace);
+}
